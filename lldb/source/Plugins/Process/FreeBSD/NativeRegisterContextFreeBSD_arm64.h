@@ -36,8 +36,10 @@ class NativeRegisterContextFreeBSD_arm64
     : public NativeRegisterContextFreeBSD,
       public NativeRegisterContextDBReg_arm64 {
 public:
-  NativeRegisterContextFreeBSD_arm64(const ArchSpec &target_arch,
-                                     NativeThreadProtocol &native_thread);
+  NativeRegisterContextFreeBSD_arm64(
+      const ArchSpec &target_arch,
+      NativeThreadProtocol &native_thread,
+      std::unique_ptr<RegisterInfoPOSIX_arm64> register_info_up);
 
   uint32_t GetRegisterSetCount() const override;
 
@@ -65,6 +67,15 @@ private:
   // a unittest to assert that).
   std::array<uint8_t, sizeof(reg)> m_reg_data;
   std::array<uint8_t, sizeof(fpreg)> m_fpreg_data;
+
+  struct arm64_addr_mask {
+    uint64_t data_mask;
+    uint64_t insn_mask;
+  };
+
+  bool m_addr_mask_is_valid;
+  struct arm64_addr_mask m_addr_mask;
+
 #ifdef LLDB_HAS_FREEBSD_WATCHPOINT
   dbreg m_dbreg;
   bool m_read_dbreg;
@@ -76,16 +87,22 @@ private:
   void *GetFPRBuffer() { return &m_fpreg_data; }
   size_t GetFPRSize() { return sizeof(m_fpreg_data); }
 
+  void *GetAddrMaskBuffer() { return &m_addr_mask; }
+  size_t GetAddrMaskBufferSize() { return sizeof(m_addr_mask); }
+
   bool IsGPR(unsigned reg) const;
   bool IsFPR(unsigned reg) const;
+  bool IsAddrMask(unsigned reg) const;
 
   Status ReadGPR();
   Status WriteGPR();
+  Status ReadAddrMask();
 
   Status ReadFPR();
   Status WriteFPR();
 
   uint32_t CalculateFprOffset(const RegisterInfo *reg_info) const;
+  uint32_t CalculateAddrMaskOffset(const RegisterInfo *reg_info) const;
 
   llvm::Error ReadHardwareDebugInfo() override;
   llvm::Error WriteHardwareDebugRegs(DREGType hwbType) override;

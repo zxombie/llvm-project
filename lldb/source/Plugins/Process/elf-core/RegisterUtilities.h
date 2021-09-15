@@ -120,6 +120,7 @@ constexpr RegsetDesc AARCH64_SVE_Desc[] = {
 };
 
 constexpr RegsetDesc AARCH64_PAC_Desc[] = {
+    {llvm::Triple::FreeBSD, llvm::Triple::aarch64, llvm::ELF::NT_ARM_PAC_MASK},
     {llvm::Triple::Linux, llvm::Triple::aarch64, llvm::ELF::NT_ARM_PAC_MASK},
 };
 

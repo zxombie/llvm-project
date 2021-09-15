@@ -19,9 +19,11 @@
 #include "Plugins/Process/Utility/RegisterInfoPOSIX_arm64.h"
 
 // clang-format off
+#include <sys/elf.h>
 #include <sys/param.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 // clang-format on
 
 #define REG_CONTEXT_SIZE (GetGPRSize() + GetFPRSize())
@@ -33,13 +35,19 @@ using namespace lldb_private::process_freebsd;
 NativeRegisterContextFreeBSD *
 NativeRegisterContextFreeBSD::CreateHostNativeRegisterContextFreeBSD(
     const ArchSpec &target_arch, NativeThreadProtocol &native_thread) {
-  return new NativeRegisterContextFreeBSD_arm64(target_arch, native_thread);
+  Flags opt_regsets;
+  opt_regsets.Set(RegisterInfoPOSIX_arm64::eRegsetMaskPAuth);
+  auto register_info_up =
+      std::make_unique<RegisterInfoPOSIX_arm64>(target_arch, opt_regsets);
+  return new NativeRegisterContextFreeBSD_arm64(target_arch, native_thread,
+      std::move(register_info_up));
 }
 
 NativeRegisterContextFreeBSD_arm64::NativeRegisterContextFreeBSD_arm64(
-    const ArchSpec &target_arch, NativeThreadProtocol &native_thread)
-    : NativeRegisterContextRegisterInfo(
-          native_thread, new RegisterInfoPOSIX_arm64(target_arch, 0))
+    const ArchSpec &target_arch, NativeThreadProtocol &native_thread,
+    std::unique_ptr<RegisterInfoPOSIX_arm64> register_info_up)
+    : NativeRegisterContextRegisterInfo(native_thread,
+                                        register_info_up.release())
 #ifdef LLDB_HAS_FREEBSD_WATCHPOINT
       ,
       m_read_dbreg(false)
@@ -47,6 +55,9 @@ NativeRegisterContextFreeBSD_arm64::NativeRegisterContextFreeBSD_arm64(
 {
   ::memset(&m_hwp_regs, 0, sizeof(m_hwp_regs));
   ::memset(&m_hbp_regs, 0, sizeof(m_hbp_regs));
+  ::memset(&m_addr_mask, 0, sizeof(m_addr_mask));
+
+  m_addr_mask_is_valid = false;
 }
 
 RegisterInfoPOSIX_arm64 &
@@ -84,6 +95,13 @@ bool NativeRegisterContextFreeBSD_arm64::IsFPR(unsigned reg) const {
   return false;
 }
 
+bool NativeRegisterContextFreeBSD_arm64::IsAddrMask(unsigned reg) const {
+  // Reuse the Linux PAuth mask register for now. On FreeBSD it can be
+  // used when PAC isn't available, e.g. with TBI.
+  return GetRegisterInfo().IsPAuthReg(reg);
+}
+
+
 Status NativeRegisterContextFreeBSD_arm64::ReadGPR() {
   return NativeProcessFreeBSD::PtraceWrapper(
       PT_GETREGS, m_thread.GetID(), m_reg_data.data());
@@ -104,9 +122,35 @@ Status NativeRegisterContextFreeBSD_arm64::WriteFPR() {
       PT_SETFPREGS, m_thread.GetID(), m_fpreg_data.data());
 }
 
+Status NativeRegisterContextFreeBSD_arm64::ReadAddrMask() {
+  Status error;
+
+#ifdef NT_ARM_ADDR_MASK
+  if (m_addr_mask_is_valid)
+    return error;
+
+  struct iovec ioVec;
+  ioVec.iov_base = GetAddrMaskBuffer();
+  ioVec.iov_len = GetAddrMaskBufferSize();
+
+  error = NativeProcessFreeBSD::PtraceWrapper(
+      PT_GETREGSET, m_thread.GetID(), &ioVec, NT_ARM_ADDR_MASK);
+
+  if (error.Success())
+    m_addr_mask_is_valid = true;
+#endif
+
+  return error;
+}
+
 uint32_t NativeRegisterContextFreeBSD_arm64::CalculateFprOffset(
     const RegisterInfo *reg_info) const {
   return reg_info->byte_offset - GetGPRSize();
+}
+
+uint32_t NativeRegisterContextFreeBSD_arm64::CalculateAddrMaskOffset(
+    const RegisterInfo *reg_info) const {
+  return reg_info->byte_offset - GetRegisterInfo().GetPAuthOffset();
 }
 
 Status
@@ -145,6 +189,14 @@ NativeRegisterContextFreeBSD_arm64::ReadRegister(const RegisterInfo *reg_info,
     offset = CalculateFprOffset(reg_info);
     assert(offset < GetFPRSize());
     src = (uint8_t *)GetFPRBuffer() + offset;
+  } else if (IsAddrMask(reg)) {
+    error = ReadAddrMask();
+    if (error.Fail())
+      return error;
+
+    offset = CalculateAddrMaskOffset(reg_info);
+    assert(offset < GetAddrMaskBufferSize());
+    src = (uint8_t *)GetAddrMaskBuffer() + offset;
   } else
     return Status("Failed to read register value");
 
