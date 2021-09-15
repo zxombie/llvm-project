@@ -24,6 +24,8 @@
 #include <sys/types.h>
 // clang-format on
 
+#define REG_CONTEXT_SIZE (GetGPRSize() + GetFPRSize())
+
 using namespace lldb;
 using namespace lldb_private;
 using namespace lldb_private::process_freebsd;
@@ -68,30 +70,43 @@ uint32_t NativeRegisterContextFreeBSD_arm64::GetUserRegisterCount() const {
   return count;
 }
 
-Status NativeRegisterContextFreeBSD_arm64::ReadRegisterSet(uint32_t set) {
-  switch (set) {
-  case RegisterInfoPOSIX_arm64::GPRegSet:
-    return NativeProcessFreeBSD::PtraceWrapper(PT_GETREGS, m_thread.GetID(),
-                                               m_reg_data.data());
-  case RegisterInfoPOSIX_arm64::FPRegSet:
-    return NativeProcessFreeBSD::PtraceWrapper(
-        PT_GETFPREGS, m_thread.GetID(),
-        m_reg_data.data() + sizeof(RegisterInfoPOSIX_arm64::GPR));
-  }
-  llvm_unreachable("NativeRegisterContextFreeBSD_arm64::ReadRegisterSet");
+bool NativeRegisterContextFreeBSD_arm64::IsGPR(unsigned reg) const {
+  if (GetRegisterInfo().GetRegisterSetFromRegisterIndex(reg) ==
+      RegisterInfoPOSIX_arm64::GPRegSet)
+    return true;
+  return false;
 }
 
-Status NativeRegisterContextFreeBSD_arm64::WriteRegisterSet(uint32_t set) {
-  switch (set) {
-  case RegisterInfoPOSIX_arm64::GPRegSet:
-    return NativeProcessFreeBSD::PtraceWrapper(PT_SETREGS, m_thread.GetID(),
-                                               m_reg_data.data());
-  case RegisterInfoPOSIX_arm64::FPRegSet:
-    return NativeProcessFreeBSD::PtraceWrapper(
-        PT_SETFPREGS, m_thread.GetID(),
-        m_reg_data.data() + sizeof(RegisterInfoPOSIX_arm64::GPR));
-  }
-  llvm_unreachable("NativeRegisterContextFreeBSD_arm64::WriteRegisterSet");
+bool NativeRegisterContextFreeBSD_arm64::IsFPR(unsigned reg) const {
+  if (GetRegisterInfo().GetRegisterSetFromRegisterIndex(reg) ==
+      RegisterInfoPOSIX_arm64::FPRegSet)
+    return true;
+  return false;
+}
+
+Status NativeRegisterContextFreeBSD_arm64::ReadGPR() {
+  return NativeProcessFreeBSD::PtraceWrapper(
+      PT_GETREGS, m_thread.GetID(), m_reg_data.data());
+}
+
+Status NativeRegisterContextFreeBSD_arm64::WriteGPR() {
+  return NativeProcessFreeBSD::PtraceWrapper(
+      PT_SETREGS, m_thread.GetID(), m_reg_data.data());
+}
+
+Status NativeRegisterContextFreeBSD_arm64::ReadFPR() {
+  return NativeProcessFreeBSD::PtraceWrapper(
+      PT_GETFPREGS, m_thread.GetID(), m_fpreg_data.data());
+}
+
+Status NativeRegisterContextFreeBSD_arm64::WriteFPR() {
+  return NativeProcessFreeBSD::PtraceWrapper(
+      PT_SETFPREGS, m_thread.GetID(), m_fpreg_data.data());
+}
+
+uint32_t NativeRegisterContextFreeBSD_arm64::CalculateFprOffset(
+    const RegisterInfo *reg_info) const {
+  return reg_info->byte_offset - GetGPRSize();
 }
 
 Status
@@ -111,14 +126,30 @@ NativeRegisterContextFreeBSD_arm64::ReadRegister(const RegisterInfo *reg_info,
                                                ? reg_info->name
                                                : "<unknown register>");
 
-  uint32_t set = GetRegisterInfo().GetRegisterSetFromRegisterIndex(reg);
-  error = ReadRegisterSet(set);
-  if (error.Fail())
-    return error;
+  uint8_t *src;
+  uint32_t offset = LLDB_INVALID_INDEX32;
 
-  assert(reg_info->byte_offset + reg_info->byte_size <= m_reg_data.size());
-  reg_value.SetBytes(m_reg_data.data() + reg_info->byte_offset,
-                     reg_info->byte_size, endian::InlHostByteOrder());
+  if (IsGPR(reg)) {
+    error = ReadGPR();
+    if (error.Fail())
+      return error;
+
+    offset = reg_info->byte_offset;
+    assert(offset < GetGPRSize());
+    src = (uint8_t *)GetGPRBuffer() + offset;
+  } else if (IsFPR(reg)) {
+    error = ReadFPR();
+    if (error.Fail())
+      return error;
+
+    offset = CalculateFprOffset(reg_info);
+    assert(offset < GetFPRSize());
+    src = (uint8_t *)GetFPRBuffer() + offset;
+  } else
+    return Status("Failed to read register value");
+
+  reg_value.SetFromMemoryData(reg_info, src, reg_info->byte_size,
+                              endian::InlHostByteOrder(), error);
   return error;
 }
 
@@ -136,33 +167,53 @@ Status NativeRegisterContextFreeBSD_arm64::WriteRegister(
                                                ? reg_info->name
                                                : "<unknown register>");
 
-  uint32_t set = GetRegisterInfo().GetRegisterSetFromRegisterIndex(reg);
-  error = ReadRegisterSet(set);
-  if (error.Fail())
-    return error;
+  uint8_t *dst;
+  uint32_t offset = LLDB_INVALID_INDEX32;
 
-  assert(reg_info->byte_offset + reg_info->byte_size <= m_reg_data.size());
-  ::memcpy(m_reg_data.data() + reg_info->byte_offset, reg_value.GetBytes(),
-           reg_info->byte_size);
+  if (IsGPR(reg)) {
+    error = ReadGPR();
+    if (error.Fail())
+      return error;
 
-  return WriteRegisterSet(set);
+    assert(reg_info->byte_offset < GetGPRSize());
+    dst = (uint8_t *)GetGPRBuffer() + reg_info->byte_offset;
+    ::memcpy(dst, reg_value.GetBytes(), reg_info->byte_size);
+
+    return WriteGPR();
+  } else if (IsFPR(reg)) {
+    error = ReadFPR();
+    if (error.Fail())
+      return error;
+
+    offset = CalculateFprOffset(reg_info);
+    assert(offset < GetFPRSize());
+    dst = (uint8_t *)GetFPRBuffer() + offset;
+    ::memcpy(dst, reg_value.GetBytes(), reg_info->byte_size);
+
+    return WriteFPR();
+  }
+
+  return Status("Failed to write register value");
 }
 
 Status NativeRegisterContextFreeBSD_arm64::ReadAllRegisterValues(
     lldb::DataBufferSP &data_sp) {
   Status error;
 
-  error = ReadRegisterSet(RegisterInfoPOSIX_arm64::GPRegSet);
+  data_sp.reset(new DataBufferHeap(REG_CONTEXT_SIZE, 0));
+
+  error = ReadGPR();
   if (error.Fail())
     return error;
 
-  error = ReadRegisterSet(RegisterInfoPOSIX_arm64::FPRegSet);
+  error = ReadFPR();
   if (error.Fail())
     return error;
 
-  data_sp.reset(new DataBufferHeap(m_reg_data.size(), 0));
   uint8_t *dst = data_sp->GetBytes();
-  ::memcpy(dst, m_reg_data.data(), m_reg_data.size());
+  ::memcpy(dst, GetGPRBuffer(), GetGPRSize());
+  dst += GetGPRSize();
+  ::memcpy(dst, GetFPRBuffer(), GetFPRSize());
 
   return error;
 }
@@ -178,7 +229,7 @@ Status NativeRegisterContextFreeBSD_arm64::WriteAllRegisterValues(
     return error;
   }
 
-  if (data_sp->GetByteSize() != m_reg_data.size()) {
+  if (data_sp->GetByteSize() != REG_CONTEXT_SIZE) {
     error.SetErrorStringWithFormat(
         "NativeRegisterContextFreeBSD_arm64::%s data_sp contained mismatched "
         "data size, expected %" PRIu64 ", actual %" PRIu64,
@@ -194,13 +245,20 @@ Status NativeRegisterContextFreeBSD_arm64::WriteAllRegisterValues(
                                    __FUNCTION__);
     return error;
   }
-  ::memcpy(m_reg_data.data(), src, m_reg_data.size());
+  ::memcpy(GetGPRBuffer(), src, GetRegisterInfoInterface().GetGPRSize());
 
-  error = WriteRegisterSet(RegisterInfoPOSIX_arm64::GPRegSet);
+  error = WriteGPR();
   if (error.Fail())
     return error;
 
-  return WriteRegisterSet(RegisterInfoPOSIX_arm64::FPRegSet);
+  src += GetRegisterInfoInterface().GetGPRSize();
+  ::memcpy(GetFPRBuffer(), src, GetFPRSize());
+
+  error = WriteFPR();
+  if (error.Fail())
+    return error;
+
+  return error;
 }
 
 llvm::Error NativeRegisterContextFreeBSD_arm64::CopyHardwareWatchpointsFrom(

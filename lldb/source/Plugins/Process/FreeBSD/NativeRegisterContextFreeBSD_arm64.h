@@ -63,14 +63,29 @@ private:
   // LLDB's GPR/FPU structs.  However, all fields have matching offsets
   // and sizes, so we do not have to worry about these (and we have
   // a unittest to assert that).
-  std::array<uint8_t, sizeof(reg) + sizeof(fpreg)> m_reg_data;
+  std::array<uint8_t, sizeof(reg)> m_reg_data;
+  std::array<uint8_t, sizeof(fpreg)> m_fpreg_data;
 #ifdef LLDB_HAS_FREEBSD_WATCHPOINT
   dbreg m_dbreg;
   bool m_read_dbreg;
 #endif
 
-  Status ReadRegisterSet(uint32_t set);
-  Status WriteRegisterSet(uint32_t set);
+  void *GetGPRBuffer() { return &m_reg_data; }
+  size_t GetGPRBufferSize() { return sizeof(m_reg_data); }
+
+  void *GetFPRBuffer() { return &m_fpreg_data; }
+  size_t GetFPRSize() { return sizeof(m_fpreg_data); }
+
+  bool IsGPR(unsigned reg) const;
+  bool IsFPR(unsigned reg) const;
+
+  Status ReadGPR();
+  Status WriteGPR();
+
+  Status ReadFPR();
+  Status WriteFPR();
+
+  uint32_t CalculateFprOffset(const RegisterInfo *reg_info) const;
 
   llvm::Error ReadHardwareDebugInfo() override;
   llvm::Error WriteHardwareDebugRegs(DREGType hwbType) override;

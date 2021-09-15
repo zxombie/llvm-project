@@ -35,6 +35,10 @@ public:
 protected:
   virtual NativeProcessFreeBSD &GetProcess();
   virtual ::pid_t GetProcessPid();
+
+  virtual size_t GetGPRSize() const {
+    return GetRegisterInfoInterface().GetGPRSize();
+  }
 };
 
 } // namespace process_freebsd
